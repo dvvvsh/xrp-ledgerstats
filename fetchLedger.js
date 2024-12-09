@@ -1,11 +1,9 @@
-process.stdout.write('\x1Bc'); // Clear console
-
-import numeral from 'numeral';
-import fs from 'fs';
-import path from 'path';
-import JSONStream from 'JSONStream';
-import WebSocket from 'ws';
-import dotenv from 'dotenv';
+const fs = require('fs'); // Correct for CommonJS
+const path = require('path');
+const JSONStream = require('JSONStream');
+const WebSocket = require('ws');
+const dotenv = require('dotenv');
+const numeral = require('numeral');
 
 dotenv.config();
 
