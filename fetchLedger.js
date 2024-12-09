@@ -1,106 +1,125 @@
-process.stdout.write('\033c')
+process.stdout.write('\x1Bc'); // Clear console
 
-const numeral = require('numeral')
-const fs = require('fs')
-const JSONStream = require('JSONStream')
-const WebSocket = require('ws')
-let endpoint = 'wss://s1.ripple.com'
+import numeral from 'numeral';
+import fs from 'fs';
+import path from 'path';
+import JSONStream from 'JSONStream';
+import WebSocket from 'ws';
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+const defaultEndpoint = 'wss://s1.ripple.com';
+let endpoint = process.env.WS_ENDPOINT || defaultEndpoint;
+
 if (process.argv.length > 3) {
-  endpoint = process.argv[3]
+  endpoint = process.argv[3];
   if (!endpoint.match(/^ws[s]*:\/\//)) {
-    endpoint = 'wss://' + endpoint
+    endpoint = 'wss://' + endpoint;
   }
 }
-console.log('Connecting to rippled running at:', endpoint)
-console.log('')
-const ws = new WebSocket(endpoint)
 
-let ledger = null
-let calls = 0
-let records = 0
-let lastMarker = ''
-let transformStream
-let outputStream
+console.log(`Connecting to rippled running at: ${endpoint}\n`);
+const ws = new WebSocket(endpoint);
+
+let ledger = null;
+let calls = 0;
+let records = 0;
+let lastMarker = '';
+let transformStream;
+let outputStream;
 
 const send = (requestJson) => {
-  calls++
-  ws.send(JSON.stringify(requestJson))
-}
+  calls++;
+  ws.send(JSON.stringify(requestJson));
+};
 
-ws.on('open', function open () {
-  let requestLedgerIndex = 'closed'
-  if (process.argv.length > 2) {
-    if (process.argv[2].match(/^[0-9]+$/)) {
-      requestLedgerIndex = parseInt(process.argv[2])
-    }
+ws.on('open', () => {
+  let requestLedgerIndex = 'closed';
+  if (process.argv.length > 2 && /^[0-9]+$/.test(process.argv[2])) {
+    requestLedgerIndex = parseInt(process.argv[2], 10);
   }
-  send({ command: 'ledger', ledger_index: requestLedgerIndex })
-})
- 
-let req = { command: 'ledger_data', ledger: null, type: 'account', limit: 20000 }
-ws.on('message', function incoming (data) {
-  const r = JSON.parse(data)
+  send({ command: 'ledger', ledger_index: requestLedgerIndex });
+});
 
-  if (ledger === null) {
-    if (typeof r.error_message === 'undefined') {
-      ledger = r.result.ledger
-      req.ledger = ledger.hash
-      console.log('Now fetching XRP ledger', ledger.ledger_index)
-      console.log('')
-      console.log(' -- Ledger close time:  ', ledger.close_time_human)
-      console.log(' -- Ledger hash:        ', ledger.hash)
-      console.log(' -- Total XRP existing: ', numeral(parseInt(ledger.total_coins) / 1000000).format('0,0.000000'))
-      console.log('')
+const req = { command: 'ledger_data', ledger: null, type: 'account', limit: 20000 };
 
-      let filename = ledger.ledger_index + '.json'
-      let stats = {
+ws.on('message', (data) => {
+  const response = JSON.parse(data);
+
+  if (!ledger) {
+    if (!response.error_message) {
+      ledger = response.result.ledger;
+      req.ledger = ledger.hash;
+
+      console.log(`Now fetching XRP ledger ${ledger.ledger_index}\n`);
+      console.log(` -- Ledger close time:  ${ledger.close_time_human}`);
+      console.log(` -- Ledger hash:        ${ledger.hash}`);
+      console.log(` -- Total XRP existing: ${numeral(parseInt(ledger.total_coins, 10) / 1_000_000).format('0,0.000000')}\n`);
+
+      const filename = `${ledger.ledger_index}.json`;
+      const stats = {
         hash: ledger.hash,
-        ledger_index: parseInt(ledger.ledger_index),
+        ledger_index: parseInt(ledger.ledger_index, 10),
         close_time_human: ledger.close_time_human,
-        total_coins: parseInt(ledger.total_coins) / 1000000
-      }
-      transformStream = JSONStream.stringify('{\n  "stats": ' + JSON.stringify(stats) + ',\n  "balances": [\n    ', ',\n    ', '\n  ]\n}\n')
-      outputStream = fs.createWriteStream(__dirname + '/data/' + filename)
-      transformStream.pipe(outputStream)
-      outputStream.on('finish', function handleFinish () {
-        console.log('')
-        console.log('Done! wrote records:', records, 'to:', './data/' + filename)
-        console.log('')
-        console.log('Now you can retrieve the stats for this ledger by running:')
-        console.log('  npm run stats ' + ledger.ledger_index)
-        console.log('')
-        process.exit(0)
-      })
+        total_coins: parseInt(ledger.total_coins, 10) / 1_000_000,
+      };
 
-      send(req)
+      const dataDir = path.join(__dirname, 'data');
+      if (!fs.existsSync(dataDir)) {
+        fs.mkdirSync(dataDir);
+      }
+
+      transformStream = JSONStream.stringify(
+        `{\n  "stats": ${JSON.stringify(stats)},\n  "balances": [\n    `,
+        ',\n    ',
+        '\n  ]\n}\n'
+      );
+      outputStream = fs.createWriteStream(path.join(dataDir, filename));
+
+      transformStream.pipe(outputStream);
+
+      outputStream.on('finish', () => {
+        console.log(`\nDone! Wrote ${records} records to: ${path.join('data', filename)}\n`);
+        console.log(`Now you can retrieve the stats for this ledger by running:\n  npm run stats ${ledger.ledger_index}\n`);
+        process.exit(0);
+      });
+
+      send(req);
     } else {
-      console.log('Error from rippled:', r.error_message)
-      ws.close()
+      console.error('Error from rippled:', response.error_message);
+      ws.close();
     }
   } else {
-    if (r.status && r.status === 'success' && r.type && r.type === 'response') {
-      if (r.result.state !== null) {
-        r.result.state.forEach((i) => {
-          records++
-          transformStream.write({ a: i.Account, b: parseInt(i.Balance) / 1000000 })
-        })
+    if (response.status === 'success' && response.type === 'response') {
+      if (response.result.state) {
+        response.result.state.forEach((i) => {
+          records++;
+          transformStream.write({ a: i.Account, b: parseInt(i.Balance, 10) / 1_000_000 });
+        });
       }
-      
-      process.stdout.write('  > Retrieved '  + records + ' accounts in ' + calls + ' calls to rippled...' + "\r");
 
-      if (typeof r.result.marker === 'undefined' || r.result.marker === null || r.result.marker === lastMarker) {
-        // No new marker
-        console.log('')
+      process.stdout.write(`  > Retrieved ${records} accounts in ${calls} calls to rippled...\r`);
 
-        transformStream.end()
+      if (!response.result.marker || response.result.marker === lastMarker) {
+        console.log('');
+        transformStream.end();
       } else {
-        // Continue 
-        req.marker = r.result.marker
-        lastMarker = req.marker
-        send(req)
+        req.marker = response.result.marker;
+        lastMarker = req.marker;
+        send(req);
       }
     } else {
-      throw new Error('Response error...')
+      console.error('Unexpected response:', response);
+      ws.close();
     }
   }
-})
+});
+
+ws.on('error', (err) => {
+  console.error('WebSocket error:', err.message);
+});
+
+ws.on('close', () => {
+  console.log('\nWebSocket connection closed.');
+});
